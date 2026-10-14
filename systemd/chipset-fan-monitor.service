@@ -1,0 +1,13 @@
+[Unit]
+Description=Chipset Thermal Fan Override Daemon
+After=fan-hardware-curves.service
+Wants=fan-hardware-curves.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/chipset-fan-monitor.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

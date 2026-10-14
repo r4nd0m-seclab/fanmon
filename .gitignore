@@ -1,0 +1,25 @@
+# Secrets and environment files
+.env
+*.env
+.env.*
+*credentials*.json
+*.pem
+*.key
+*token*.json
+
+# Bytecode / caches
+__pycache__/
+*.py[cod]
+
+# Agent and IDE metadata
+.hermes/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Ad-hoc screenshots / exports
+*.png
+!docs/fanmon01.png
+data/
+output/

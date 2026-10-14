@@ -1,0 +1,550 @@
+#!/usr/bin/env python3
+"""
+fanmon — Real-Time Hardware Thermal & Fan Telemetry Monitor
+Designed for Linux desktop workstation with Nuvoton Super I/O, NZXT Kraken, ASUS EC, AMD k10temp, and NVIDIA GPU.
+"""
+
+import curses
+import glob
+import os
+import subprocess
+import sys
+import textwrap
+import time
+
+def safe_read(path, default=""):
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except Exception:
+        return default
+
+def safe_int(path, default=0):
+    val = safe_read(path, "")
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+def safe_float(path, default=0.0):
+    val = safe_read(path, "")
+    try:
+        return float(val)
+    except ValueError:
+        return default
+
+class HardwareTelemetry:
+    def __init__(self):
+        self.hwmon_map = {}
+        self.last_discovery = 0
+        self.discover_hwmon()
+
+    def discover_hwmon(self):
+        now = time.time()
+        if now - self.last_discovery < 5.0 and self.hwmon_map:
+            return
+        self.last_discovery = now
+        new_map = {}
+        for p in glob.glob("/sys/class/hwmon/hwmon*"):
+            name = safe_read(os.path.join(p, "name"))
+            if name:
+                new_map[name] = p
+        self.hwmon_map = new_map
+
+    def read_all(self):
+        self.discover_hwmon()
+        fans = []
+        temps = []
+        system_info = {}
+
+        # 1. Nuvoton NCT6798 / NCT6775
+        nct_dir = None
+        for k in self.hwmon_map:
+            if k.startswith("nct"):
+                nct_dir = self.hwmon_map[k]
+                break
+
+        if nct_dir:
+            # Fan 1 (CHA_FAN1: Rear Exhaust Fan)
+            f1_rpm = safe_int(os.path.join(nct_dir, "fan1_input"))
+            f1_pwm = safe_int(os.path.join(nct_dir, "pwm1"))
+            f1_en = safe_int(os.path.join(nct_dir, "pwm1_enable"))
+            fans.append({
+                "name": "Rear Exhaust Fan",
+                "role": "CHA_FAN1 Rear (PWM)",
+                "rpm": f1_rpm,
+                "pwm": f1_pwm,
+                "pwm_pct": int((f1_pwm / 255.0) * 100) if f1_pwm > 0 else 0,
+                "mode": f"HW Smart {f1_en}" if f1_en == 5 else f"Manual {f1_en}",
+                "max_rpm": 2300,
+            })
+
+            # Fan 2 (CPU_FAN: X570 Aux Fan - heatsink + bottom GPU)
+            f2_rpm = safe_int(os.path.join(nct_dir, "fan2_input"))
+            f2_pwm = safe_int(os.path.join(nct_dir, "pwm2"))
+            f2_en = safe_int(os.path.join(nct_dir, "pwm2_enable"))
+            fans.append({
+                "name": "X570 Aux Fan",
+                "role": "CPU_FAN Aux (PWM)",
+                "rpm": f2_rpm,
+                "pwm": f2_pwm,
+                "pwm_pct": int((f2_pwm / 255.0) * 100) if f2_pwm > 0 else 0,
+                "mode": f"Manual {f2_en}" if f2_en == 1 else f"HW Smart {f2_en}",
+                "max_rpm": 2100,
+            })
+
+            # Fan 3 (CHA_FAN2: Front Intake Fans - 3x daisy-chained cluster)
+            f3_rpm = safe_int(os.path.join(nct_dir, "fan3_input"))
+            f3_pwm = safe_int(os.path.join(nct_dir, "pwm3"))
+            f3_en = safe_int(os.path.join(nct_dir, "pwm3_enable"))
+            fans.append({
+                "name": "Front Intake Fans",
+                "role": "CHA_FAN2 Front (PWM)",
+                "rpm": f3_rpm,
+                "pwm": f3_pwm,
+                "pwm_pct": int((f3_pwm / 255.0) * 100) if f3_pwm > 0 else 0,
+                "mode": f"HW Smart {f3_en}" if f3_en == 5 else f"Manual {f3_en}",
+                "max_rpm": 2300,
+            })
+
+            # Motherboard temps
+            peci = safe_int(os.path.join(nct_dir, "temp8_input")) / 1000.0
+            systin = safe_int(os.path.join(nct_dir, "temp1_input")) / 1000.0
+            if peci > 0:
+                temps.append({"label": "PECI CPU Calib", "temp": peci, "target": 75.0})
+            if systin > 0:
+                temps.append({"label": "Motherboard", "temp": systin, "target": 65.0})
+
+        # 2. NZXT Kraken AIO
+        kraken_dir = None
+        for k in self.hwmon_map:
+            if "kraken" in k:
+                kraken_dir = self.hwmon_map[k]
+                break
+
+        if kraken_dir:
+            k_fan_rpm = safe_int(os.path.join(kraken_dir, "fan2_input"))
+            k_fan_pwm = safe_int(os.path.join(kraken_dir, "pwm2"))
+            k_fan_en = safe_int(os.path.join(kraken_dir, "pwm2_enable"))
+            fans.append({
+                "name": "Kraken AIO Fans",
+                "role": "240mm Radiator Exhaust",
+                "rpm": k_fan_rpm,
+                "pwm": k_fan_pwm,
+                "pwm_pct": int((k_fan_pwm / 255.0) * 100) if k_fan_pwm > 0 else 0,
+                "mode": "NZXT Auto (0-RPM)" if k_fan_en == 2 else f"Manual {k_fan_en}",
+                "max_rpm": 2000,
+            })
+
+            k_pump_rpm = safe_int(os.path.join(kraken_dir, "fan1_input"))
+            k_pump_pwm = safe_int(os.path.join(kraken_dir, "pwm1"))
+            k_pump_en = safe_int(os.path.join(kraken_dir, "pwm1_enable"))
+            fans.append({
+                "name": "Kraken AIO Pump",
+                "role": "Liquid Coolant Pump",
+                "rpm": k_pump_rpm,
+                "pwm": k_pump_pwm,
+                "pwm_pct": 60 if k_pump_en == 2 else int((k_pump_pwm / 255.0) * 100),
+                "mode": "Hardware Auto" if k_pump_en == 2 else f"Mode {k_pump_en}",
+                "max_rpm": 3000,
+            })
+
+            coolant_t = safe_int(os.path.join(kraken_dir, "temp1_input")) / 1000.0
+            if coolant_t > 0:
+                temps.append({"label": "Kraken Coolant", "temp": coolant_t, "target": 55.0})
+
+        # 3. ASUS EC Sensors (Chipset fan + VRM)
+        asusec_dir = self.hwmon_map.get("asusec")
+        if asusec_dir:
+            chip_rpm = safe_int(os.path.join(asusec_dir, "fan1_input"))
+            chip_t = safe_int(os.path.join(asusec_dir, "temp1_input")) / 1000.0
+            vrm_t = safe_int(os.path.join(asusec_dir, "temp5_input")) / 1000.0
+            fans.append({
+                "name": "X570 Chipset Fan",
+                "role": "Motherboard PCH Heatsink",
+                "rpm": chip_rpm,
+                "pwm": 0 if chip_rpm == 0 else int((chip_rpm / 3500.0) * 100),
+                "pwm_pct": 0 if chip_rpm == 0 else int((chip_rpm / 3500.0) * 100),
+                "mode": "ASUS EC Auto",
+                "max_rpm": 3500,
+            })
+            if chip_t > 0:
+                temps.append({"label": "X570 Chipset", "temp": chip_t, "target": 75.0})
+            if vrm_t > 0:
+                temps.append({"label": "Motherboard VRM", "temp": vrm_t, "target": 80.0})
+
+        # 4. AMD k10temp (CPU Tctl)
+        k10_dir = self.hwmon_map.get("k10temp")
+        if k10_dir:
+            tctl = safe_int(os.path.join(k10_dir, "temp1_input")) / 1000.0
+            tccd1 = safe_int(os.path.join(k10_dir, "temp3_input")) / 1000.0
+            tccd2 = safe_int(os.path.join(k10_dir, "temp4_input")) / 1000.0
+            if tctl > 0:
+                temps.append({"label": "CPU (Tctl)", "temp": tctl, "target": 85.0})
+            if tccd1 > 0:
+                temps.append({"label": "CPU CCD1", "temp": tccd1, "target": 85.0})
+            if tccd2 > 0:
+                temps.append({"label": "CPU CCD2", "temp": tccd2, "target": 85.0})
+
+        # 5. Corsair PSU
+        psu_dir = self.hwmon_map.get("corsairpsu")
+        if psu_dir:
+            psu_rpm = safe_int(os.path.join(psu_dir, "fan1_input"))
+            psu_pwr = safe_int(os.path.join(psu_dir, "power1_input")) / 1000000.0
+            fans.append({
+                "name": "Corsair HX1500i",
+                "role": "Power Supply Fan",
+                "rpm": psu_rpm,
+                "pwm": 0,
+                "pwm_pct": 0 if psu_rpm == 0 else int((psu_rpm / 2000.0) * 100),
+                "mode": "Zero-RPM Auto",
+                "max_rpm": 2000,
+            })
+            if psu_pwr > 0:
+                system_info["psu_power"] = f"{psu_pwr:.1f} W"
+
+        # 6. NVIDIA GPU(s)
+        try:
+            res = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,temperature.gpu,fan.speed,power.draw", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=0.5
+            )
+            if res.returncode == 0:
+                for idx, line in enumerate(res.stdout.strip().splitlines()):
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 4:
+                        g_name = parts[0].replace("NVIDIA GeForce ", "")
+                        g_temp = float(parts[1])
+                        g_fan = int(parts[2]) if parts[2] != "[Not Supported]" else 0
+                        g_pwr = float(parts[3])
+                        fans.append({
+                            "name": f"GPU {idx} ({g_name})",
+                            "role": f"Graphics Card #{idx}",
+                            "rpm": g_fan,
+                            "pwm": g_fan,
+                            "pwm_pct": g_fan,
+                            "mode": "Driver Auto",
+                            "max_rpm": 100,
+                            "is_pct_rpm": True,
+                        })
+                        temps.append({"label": f"GPU {idx} ({g_name})", "temp": g_temp, "target": 83.0})
+                        system_info[f"gpu{idx}_power"] = f"{g_pwr:.1f} W"
+        except Exception:
+            pass
+
+        # Service Status
+        try:
+            res = subprocess.run(["systemctl", "is-active", "fan-hardware-curves.service"], capture_output=True, text=True)
+            system_info["curve_service"] = res.stdout.strip()
+        except Exception:
+            system_info["curve_service"] = "unknown"
+
+        return fans, temps, system_info
+
+def get_status_str(item):
+    rpm = item["rpm"]
+    name = item["name"]
+    if rpm == 0:
+        if "Kraken" in name:
+            return "Zero-RPM Silent (Coolant <36°C)"
+        if "Chipset" in name:
+            return "Zero-RPM Inactive (<58°C)"
+        if "GPU" in name or "Corsair" in name:
+            return "Zero-RPM Stopped"
+        if "Daisy" in item.get("role", ""):
+            return "No Tach (Daisy-Chained, Manual PWM)"
+        return "Stopped / Stalled"
+    if "Pump" in name:
+        return "Active Circulation (Quiet)"
+    if "Chipset" in name:
+        if rpm > 2600:
+            return "High Whine (Active PCH Cooling)"
+        return "Quiet PCH Regulation"
+    if rpm < 600:
+        return "Silent (<600 RPM)"
+    if rpm < 1000:
+        return "Quiet Acoustic Floor"
+    if rpm < 1500:
+        return "Moderate Cooling Ramp"
+    return "High Load Thermal Ramp"
+
+def make_bar(pct, width=12):
+    pct = max(0, min(100, pct))
+    filled = int(round((pct / 100.0) * width))
+    empty = width - filled
+    return "■" * filled + "·" * empty
+
+def compute_col_widths(box_w):
+    """
+    Returns (c1, c2, c3, c4, c5, c6) such that:
+    1 (border) + c1 + 1 + c2 + 1 + c3 + 1 + c4 + 1 + c5 + 1 + c6 + 1 (border) == box_w
+    """
+    if box_w >= 115:
+        c1, c2, c3, c4, c5 = 22, 11, 12, 14, 16
+    elif box_w >= 95:
+        c1, c2, c3, c4, c5 = 18, 9, 10, 12, 14
+    else:
+        c1, c2, c3, c4, c5 = 16, 8, 8, 10, 12
+
+    c6 = max(10, box_w - (c1 + c2 + c3 + c4 + c5 + 7))
+    return c1, c2, c3, c4, c5, c6
+
+def safe_addstr(win, y, x, text, attr=0):
+    try:
+        h, w = win.getmaxyx()
+        if y < 0 or y >= h or x < 0 or x >= w:
+            return
+        max_len = w - x
+        if y == h - 1:
+            max_len = max(0, w - x - 1)
+        sub = text[:max_len]
+        if sub:
+            win.addstr(y, x, sub, attr)
+    except curses.error:
+        pass
+
+def tui_loop(stdscr):
+    curses.curs_set(0)
+    curses.use_default_colors()
+    stdscr.nodelay(True)
+    stdscr.timeout(1000)
+
+    try:
+        curses.init_pair(1, curses.COLOR_CYAN, -1)     # Headers / borders
+        curses.init_pair(2, curses.COLOR_GREEN, -1)    # Silent / Low / Good
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)   # Warning / Moderate
+        curses.init_pair(4, curses.COLOR_RED, -1)      # High / Hot / Alert
+        curses.init_pair(5, curses.COLOR_WHITE, -1)    # Normal text
+        curses.init_pair(6, curses.COLOR_MAGENTA, -1)  # Status pills / accent
+        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN) # Inverted footer
+    except curses.error:
+        pass
+
+    telemetry = HardwareTelemetry()
+    refresh_rate = 1.0
+    paused = False
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+
+        if h < 14 or w < 65:
+            safe_addstr(stdscr, 0, 0, f"Window too small ({w}x{h}). Resize to at least 70x16.", curses.A_BOLD)
+            stdscr.refresh()
+            time.sleep(0.5)
+            ch = stdscr.getch()
+            if ch in (ord('q'), ord('Q'), 27):
+                break
+            continue
+
+        # Target a clean, unified box width (clamped to screen width, standard 118-120 max)
+        box_w = min(w, 120)
+        c1, c2, c3, c4, c5, c6 = compute_col_widths(box_w)
+        inner_w = box_w - 2
+
+        fans, temps, sysinfo = telemetry.read_all()
+
+        # 1. Header Banner
+        title = " FANMON — Real-Time Thermal & Fan Telemetry "
+        time_str = time.strftime(" %Y-%m-%d %H:%M:%S ")
+        header_text = title
+        pad = inner_w - len(header_text) - len(time_str)
+        if pad > 0:
+            header_text += " " * pad + time_str
+        else:
+            header_text = header_text[:inner_w]
+
+        safe_addstr(stdscr, 0, 0, "┌" + "─" * inner_w + "┐", curses.color_pair(1))
+        safe_addstr(stdscr, 1, 0, "│" + header_text.ljust(inner_w) + "│", curses.color_pair(1) | curses.A_BOLD)
+        safe_addstr(stdscr, 2, 0, "├" + "─" * inner_w + "┤", curses.color_pair(1))
+
+        # 2. Telemetry Pills Bar
+        pill_items = []
+        for t in temps:
+            if "Tctl" in t["label"]: pill_items.append(f"CPU: {t['temp']:.1f}°C")
+            elif "Coolant" in t["label"]: pill_items.append(f"Coolant: {t['temp']:.1f}°C")
+            elif "Chipset" in t["label"]: pill_items.append(f"Chipset: {t['temp']:.1f}°C")
+            elif "GPU 0" in t["label"]: pill_items.append(f"GPU: {t['temp']:.0f}°C")
+
+        if "psu_power" in sysinfo:
+            pill_items.append(f"Power: {sysinfo['psu_power']}")
+        svc_status = sysinfo.get("curve_service", "unknown")
+        pill_items.append(f"SmartFan Curve: {svc_status.upper()}")
+
+        pill_text = " " + "  •  ".join(pill_items)
+        safe_addstr(stdscr, 3, 0, "│" + pill_text.ljust(inner_w) + "│", curses.color_pair(6) | curses.A_BOLD)
+
+        # 3. Table Transition Header (with ┬ dividers aligned to columns)
+        top_table_div = "├" + "─"*c1 + "┬" + "─"*c2 + "┬" + "─"*c3 + "┬" + "─"*c4 + "┬" + "─"*c5 + "┬" + "─"*c6 + "┤"
+        safe_addstr(stdscr, 4, 0, top_table_div, curses.color_pair(1))
+
+        col_name = "Fan Header / Device"
+        col_rpm = "Speed"
+        col_pwm = "PWM Duty"
+        col_bar = "Activity"
+        col_mode = "Mode"
+        col_status = "Status / Acoustic Level"
+
+        table_header = f"│ {col_name:<{c1-2}} │ {col_rpm:>{c2-2}} │ {col_pwm:>{c3-2}} │ {col_bar:<{c4-2}} │ {col_mode:<{c5-2}} │ {col_status:<{c6-2}} │"
+        safe_addstr(stdscr, 5, 0, table_header, curses.color_pair(1) | curses.A_BOLD)
+
+        row_div = "├" + "─"*c1 + "┼" + "─"*c2 + "┼" + "─"*c3 + "┼" + "─"*c4 + "┼" + "─"*c5 + "┼" + "─"*c6 + "┤"
+        safe_addstr(stdscr, 6, 0, row_div, curses.color_pair(1))
+
+        # 4. Fans Data Rows
+        row_y = 7
+        for fan in fans:
+            if row_y >= h - 7:
+                break
+            rpm = fan["rpm"]
+            is_pct = fan.get("is_pct_rpm", False)
+            rpm_str = f"{rpm} %" if is_pct else f"{rpm} RPM"
+            pwm_pct = fan["pwm_pct"]
+            pwm_str = f"{pwm_pct}%" if is_pct else f"{pwm_pct}% ({fan['pwm']})"
+            bar_pct = pwm_pct if pwm_pct > 0 else (int((rpm / float(fan['max_rpm'])) * 100) if rpm > 0 else 0)
+            bar_str = make_bar(bar_pct, width=c4-2)
+            mode_str = fan["mode"][:c5-2]
+            status_str = get_status_str(fan)[:c6-2]
+
+            color = curses.color_pair(2)
+            if rpm == 0:
+                color = curses.color_pair(5)
+            elif "Chipset" in fan["name"] and rpm > 2600:
+                color = curses.color_pair(4) | curses.A_BOLD
+            elif rpm > 1400 and not is_pct:
+                color = curses.color_pair(3)
+            elif rpm > 1800 and not is_pct:
+                color = curses.color_pair(4)
+
+            # Draw cells with perfectly aligned borders
+            line_p1 = f"│ {fan['name']:<{c1-2}} │ {rpm_str:>{c2-2}} │ {pwm_str:>{c3-2}} │ "
+            safe_addstr(stdscr, row_y, 0, line_p1, curses.color_pair(5))
+            x_cursor = len(line_p1)
+
+            # Draw bar with color
+            safe_addstr(stdscr, row_y, x_cursor, bar_str, color)
+            x_cursor += len(bar_str)
+
+            # Draw mode and status, ending exactly with │ at box_w - 1
+            line_p2 = f" │ {mode_str:<{c5-2}} │ {status_str:<{c6-2}} │"
+            safe_addstr(stdscr, row_y, x_cursor, line_p2, curses.color_pair(5))
+            row_y += 1
+
+        # 5. Table Bottom Transition (with ┴ dividers capping the table columns)
+        bot_table_div = "├" + "─"*c1 + "┴" + "─"*c2 + "┴" + "─"*c3 + "┴" + "─"*c4 + "┴" + "─"*c5 + "┴" + "─"*c6 + "┤"
+        safe_addstr(stdscr, row_y, 0, bot_table_div, curses.color_pair(1))
+        row_y += 1
+
+        # 6. Temperature Summary Section
+        t_header = " Temperature Probes:"
+        safe_addstr(stdscr, row_y, 0, "│" + t_header.ljust(inner_w) + "│", curses.color_pair(1) | curses.A_BOLD)
+        row_y += 1
+
+        t_str = " " + "  •  ".join([f"{t['label']}: {t['temp']:.1f}°C" for t in temps])
+        lines = textwrap.wrap(t_str, width=inner_w - 2)
+        for l in lines:
+            if row_y >= h - 4:
+                break
+            safe_addstr(stdscr, row_y, 0, "│ " + l.ljust(inner_w - 1) + "│", curses.color_pair(5))
+            row_y += 1
+
+        # 7. Bottom Instructions / Footer
+        safe_addstr(stdscr, row_y, 0, "├" + "─" * inner_w + "┤", curses.color_pair(1))
+        row_y += 1
+        footer = f" [q] Quit  [r] Refresh  [p] {'Resume' if paused else 'Pause'}  [+/-] Rate: {refresh_rate:.1f}s  [c] Re-apply Curves"
+        safe_addstr(stdscr, row_y, 0, "│" + footer.ljust(inner_w) + "│", curses.color_pair(7))
+        row_y += 1
+
+        # 8. Bottom Border Closing Box
+        safe_addstr(stdscr, row_y, 0, "└" + "─" * inner_w + "┘", curses.color_pair(1))
+
+        try:
+            stdscr.refresh()
+        except curses.error:
+            pass
+
+        # Handle keyboard input
+        try:
+            ch = stdscr.getch()
+            if ch in (ord('q'), ord('Q'), 27):
+                break
+            elif ch in (ord(' '), ord('p'), ord('P')):
+                paused = not paused
+            elif ch in (ord('r'), ord('R')):
+                continue
+            elif ch in (ord('+'), ord('=')):
+                refresh_rate = max(0.2, refresh_rate - 0.2)
+                stdscr.timeout(int(refresh_rate * 1000))
+            elif ch in (ord('-'), ord('_')):
+                refresh_rate = min(5.0, refresh_rate + 0.2)
+                stdscr.timeout(int(refresh_rate * 1000))
+            elif ch in (ord('c'), ord('C')):
+                subprocess.run(["./scripts/apply-fan-curves.sh"], capture_output=True)
+        except curses.error:
+            pass
+
+def print_once():
+    telemetry = HardwareTelemetry()
+    fans, temps, sysinfo = telemetry.read_all()
+    box_w = 120
+    c1, c2, c3, c4, c5, c6 = compute_col_widths(box_w)
+    inner_w = box_w - 2
+
+    print("┌" + "─" * inner_w + "┐")
+    title = " FANMON — Hardware Thermal & Fan Telemetry "
+    time_str = time.strftime(" %Y-%m-%d %H:%M:%S ")
+    pad = inner_w - len(title) - len(time_str)
+    header_text = title + (" " * max(0, pad)) + time_str
+    print("│" + header_text.ljust(inner_w) + "│")
+    print("├" + "─" * inner_w + "┤")
+
+    pills = []
+    for t in temps:
+        if "Tctl" in t["label"]: pills.append(f"CPU: {t['temp']:.1f}°C")
+        elif "Coolant" in t["label"]: pills.append(f"Coolant: {t['temp']:.1f}°C")
+        elif "Chipset" in t["label"]: pills.append(f"Chipset: {t['temp']:.1f}°C")
+        elif "GPU 0" in t["label"]: pills.append(f"GPU: {t['temp']:.0f}°C")
+    if "psu_power" in sysinfo: pills.append(f"Power: {sysinfo['psu_power']}")
+    pills.append(f"Curve Service: {sysinfo.get('curve_service', 'unknown').upper()}")
+    pill_text = " " + "  •  ".join(pills)
+    print("│" + pill_text.ljust(inner_w) + "│")
+
+    # Table top transition
+    print("├" + "─"*c1 + "┬" + "─"*c2 + "┬" + "─"*c3 + "┬" + "─"*c4 + "┬" + "─"*c5 + "┬" + "─"*c6 + "┤")
+    print(f"│ {'Fan Header / Device':<{c1-2}} │ {'Speed':>{c2-2}} │ {'PWM Duty':>{c3-2}} │ {'Activity':<{c4-2}} │ {'Mode':<{c5-2}} │ {'Status / Acoustic Level':<{c6-2}} │")
+    print("├" + "─"*c1 + "┼" + "─"*c2 + "┼" + "─"*c3 + "┼" + "─"*c4 + "┼" + "─"*c5 + "┼" + "─"*c6 + "┤")
+
+    for f in fans:
+        rpm = f["rpm"]
+        is_pct = f.get("is_pct_rpm", False)
+        rpm_str = f"{rpm} %" if is_pct else f"{rpm} RPM"
+        pwm_pct = f["pwm_pct"]
+        pwm_str = f"{pwm_pct}%" if is_pct else f"{pwm_pct}% ({f['pwm']})"
+        bar_pct = pwm_pct if pwm_pct > 0 else (int((rpm / float(f['max_rpm'])) * 100) if rpm > 0 else 0)
+        bar_str = make_bar(bar_pct, width=c4-2)
+        st = get_status_str(f)[:c6-2]
+        m = f["mode"][:c5-2]
+        print(f"│ {f['name']:<{c1-2}} │ {rpm_str:>{c2-2}} │ {pwm_str:>{c3-2}} │ {bar_str:<{c4-2}} │ {m:<{c5-2}} │ {st:<{c6-2}} │")
+
+    # Table bottom transition
+    print("├" + "─"*c1 + "┴" + "─"*c2 + "┴" + "─"*c3 + "┴" + "─"*c4 + "┴" + "─"*c5 + "┴" + "─"*c6 + "┤")
+    print("│" + " Temperature Probes:".ljust(inner_w) + "│")
+    t_str = " " + "  •  ".join([f"{t['label']}: {t['temp']:.1f}°C" for t in temps])
+    for l in textwrap.wrap(t_str, width=inner_w - 2):
+        print("│ " + l.ljust(inner_w - 1) + "│")
+    print("├" + "─" * inner_w + "┤")
+    footer = " [q] Quit  [r] Refresh  [p] Pause  [+/-] Rate: 1.0s  [c] Re-apply Curves"
+    print("│" + footer.ljust(inner_w) + "│")
+    print("└" + "─" * inner_w + "┘")
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("--once", "-1", "--status", "-s"):
+        print_once()
+        return
+    try:
+        curses.wrapper(tui_loop)
+    except KeyboardInterrupt:
+        pass
+
+if __name__ == "__main__":
+    main()
