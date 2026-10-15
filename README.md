@@ -24,7 +24,8 @@ components simply don't show up.
   - `fanmon` — interactive curses TUI (1 s default refresh)
   - `fanmon --once` — single plain-text snapshot (scriptable)
 - **TUI keys**: `q` quit, `r` refresh, `p`/space pause, `+/=` faster, `-/`
-  slower, `c` re-apply fan curves (calls `scripts/apply-fan-curves.sh`).
+  slower, `c` re-apply fan curves (re-runs the installed
+  `/usr/local/sbin/apply-fan-curves.sh`).
 - **Acoustic status labels** — RPM bands map to human-readable states
   (Silent, Quiet Acoustic Floor, Moderate Ramp, High Load Ramp, Zero-RPM
   Silent, High Whine for PCH fans, …).
@@ -61,9 +62,10 @@ appear if absent.
 ### 2. Fan curve control (ASUS X570 + NCT6798 example)
 
 The scripts in `scripts/` are tuned for the specific build this was written
-on (NCT6798 PWM1/2/3 = rear / X570 aux / front intake; `asusec` for the PCH
-fan; Kraken 2023 AIO). Adapt the PWM values, header assignments, and
-temperature breakpoints to your board before enabling.
+on (NCT6798 PWM1 = rear, PWM3 = front intake, PWM4 = X570 aux, PWM2
+unpopulated; `asusec` for the PCH fan; Kraken 2023 AIO). Adapt the PWM
+values, header assignments, and temperature breakpoints to your board before
+enabling.
 
 ```sh
 sudo install -m 755 scripts/apply-fan-curves.sh /usr/local/sbin/
@@ -75,17 +77,22 @@ sudo systemctl enable --now fan-hardware-curves.service
 sudo systemctl enable --now chipset-fan-monitor.service
 ```
 
-If you keep the monitor in this repo checkout instead of `/usr/local/bin`,
-the TUI's `c` key calls `./scripts/apply-fan-curves.sh` relative to the
-current working directory.
+The TUI's `c` key re-applies the curves by invoking the **installed**
+`/usr/local/sbin/apply-fan-curves.sh` (absolute path), not the copy in this
+repo checkout. So install the script to `/usr/local/sbin/` first — the `c`
+key and the `fan-hardware-curves` boot unit both target that location — then
+run the TUI from anywhere (repo checkout, `/usr/local/bin`, or elsewhere).
+If `/usr/local/sbin/apply-fan-curves.sh` is not installed, `c` is a silent
+no-op so the TUI never crashes on a missing path.
 
 ### Curve summary (as shipped)
 
 | Header | Control | Behavior |
 |---|---|---|
 | PWM1 — CHA_FAN1 (rear) | HW SmartFan IV | CPU PECI-tracked: 45 °C → 27 % … 75 °C → 80 % (PWM 204 cap), 85 °C → 100 % failsafe |
-| PWM2 — CPU_FAN (X570 aux) | Manual (daemon) | 70 % floor ≤ 55 °C, ramps 70 → 95 % to 70 °C PCH, 100 % above |
+| PWM2 — CPU_FAN (unpopulated) | Off | Header removed from aux cooling; left off (fan2 tach may read phantom RPM) |
 | PWM3 — CHA_FAN2 (front intake) | HW SmartFan IV | Same curve as PWM1 |
+| PWM4 — CHA_FAN3 (X570 aux, 2 serial fans) | Manual (daemon) | 70 % floor ≤ 55 °C, ramps 70 → 95 % to 70 °C PCH, 100 % above |
 | Kraken pump/fan | NZXT hardware auto | 0-RPM mode below ~36 °C coolant |
 
 When the PCH fan RPM exceeds ~80 % (≈ 2800 RPM), `chipset-fan-monitor.py`

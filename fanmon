@@ -479,7 +479,9 @@ def tui_loop(stdscr):
                 refresh_rate = min(5.0, refresh_rate + 0.2)
                 stdscr.timeout(int(refresh_rate * 1000))
             elif ch in (ord('c'), ord('C')):
-                subprocess.run(["/usr/local/sbin/apply-fan-curves.sh"], capture_output=True)
+                curve_script = "/usr/local/sbin/apply-fan-curves.sh"
+                if os.path.exists(curve_script):
+                    subprocess.run([curve_script], capture_output=True)
         except curses.error:
             pass
 
