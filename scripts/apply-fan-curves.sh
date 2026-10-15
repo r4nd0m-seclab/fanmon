@@ -30,10 +30,10 @@ if [ -n "$NCT_DIR" ]; then
     echo 85000 > "$NCT_DIR/pwm1_auto_point5_temp"   # 85C
     echo 5     > "$NCT_DIR/pwm1_enable"
 
-    # PWM2 (CPU_FAN: X570 Aux Fan - chipset heatsink + bottom GPU)
-    # Starts at 70% floor (PWM 178); managed dynamically by chipset-fan-monitor.service
-    echo 1     > "$NCT_DIR/pwm2_enable"
-    echo 178   > "$NCT_DIR/pwm2"
+    # PWM2 (CPU_FAN: UNPOPULATED - header removed from aux cooling)
+    # Kept off. fan2 tach may read phantom RPM on the floating sense line.
+    echo 1     > "$NCT_DIR/pwm2_enable" 2>/dev/null || true
+    echo 0     > "$NCT_DIR/pwm2" 2>/dev/null || true
 
     # PWM3 (CHA_FAN2: Front Intake Fans - 3x daisy-chained cluster)
     # Hardware SmartFan IV curve tracking CPU PECI (temp8) - matching rear at 80% max (PWM 204)
@@ -50,9 +50,10 @@ if [ -n "$NCT_DIR" ]; then
     echo 85000 > "$NCT_DIR/pwm3_auto_point5_temp"   # 85C
     echo 5     > "$NCT_DIR/pwm3_enable"
 
-    # PWM4 (Unpopulated)
-    echo 1     > "$NCT_DIR/pwm4_enable" 2>/dev/null || true
-    echo 0     > "$NCT_DIR/pwm4" 2>/dev/null || true
+    # PWM4 (CHA_FAN3: X570 Aux Fans - two serial-connected fans, chipset heatsink)
+    # Starts at 70% floor (PWM 178); managed dynamically by chipset-fan-monitor.service
+    echo 1     > "$NCT_DIR/pwm4_enable"
+    echo 178   > "$NCT_DIR/pwm4"
 
     # PWM5 (Unpopulated)
     echo 1     > "$NCT_DIR/pwm5_enable" 2>/dev/null || true

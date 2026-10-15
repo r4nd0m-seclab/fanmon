@@ -3,12 +3,13 @@
 Chipset Thermal Ramp Daemon
 Monitors X570 chipset fan speed/temp from ASUS EC.
 - pwm1 (CHA_FAN1: Rear Exhaust): Hardware SmartFan IV curve tracking CPU PECI (capped at 80% / 204 PWM).
-- pwm2 (CPU_FAN: X570 Aux Fan): Managed dynamically tracking X570 chipset temperature.
+- pwm4 (CHA_FAN3: X570 Aux Fans - two serial-connected fans): Managed dynamically tracking X570 chipset temperature.
     Floor: 70% (PWM 178) at <=50°C
     50°C - 55°C: 70% (PWM 178)
     55°C - 65°C: Ramp 70% -> 85% (PWM 178 -> 217)
     65°C - 70°C: Ramp 85% -> 95% (PWM 217 -> 242)
     >70°C: 100% (PWM 255)
+- pwm2 (CPU_FAN: UNPOPULATED) - header no longer in use, left off.
 - pwm3 (CHA_FAN2: Front Intake Fans - 3x cluster): Hardware SmartFan IV curve tracking CPU PECI (matching rear, capped at 80% / 204 PWM).
 - If chipset fan enters high-speed ramp (>80 PWM / >2800 RPM), pwm1 (Rear) and pwm3 (Front)
   are also temporarily boosted to flush case heat, matched and capped at 80% (PWM 204).
@@ -98,9 +99,9 @@ def get_cpu_safety_pwm(cpu_t):
         return 204
 
 def main():
-    log("Daemon starting (pwm1=Rear [max 80%], pwm2=X570 Aux, pwm3=Front Intake [max 80%])...")
+    log("Daemon starting (pwm1=Rear [max 80%], pwm4=X570 Aux, pwm3=Front Intake [max 80%])...")
     is_case_ramping = False
-    last_pwm2 = -1
+    last_pwm4 = -1
     last_log_time = 0
 
     while running:
@@ -114,32 +115,32 @@ def main():
         chip_pwm = (chip_rpm / 3500.0) * 100.0 if chip_rpm > 0 else 0.0
         now = time.time()
 
-        # 1. Calculate X570 Aux Fan target PWM (pwm2 on CPU_FAN header)
+        # 1. Calculate X570 Aux Fan target PWM (pwm4 on CHA_FAN3 header, two serial fans)
         # 70% floor is 178 PWM (~1000 RPM)
         if chip_temp <= 50.0:
-            target_pwm2 = 178
+            target_pwm4 = 178
         elif chip_temp <= 55.0:
-            target_pwm2 = 178
+            target_pwm4 = 178
         elif chip_temp <= 65.0:
             frac = (chip_temp - 55.0) / 10.0
-            target_pwm2 = int(178 + frac * 39)  # 178 -> 217 (85%)
+            target_pwm4 = int(178 + frac * 39)  # 178 -> 217 (85%)
         elif chip_temp <= 70.0:
             frac = (chip_temp - 65.0) / 5.0
-            target_pwm2 = int(217 + frac * 25)  # 217 -> 242 (95%)
+            target_pwm4 = int(217 + frac * 25)  # 217 -> 242 (95%)
         else:
-            target_pwm2 = 255
+            target_pwm4 = 255
 
-        # Ensure pwm2 is in manual mode
-        current_en2 = safe_read_int(os.path.join(nct_dir, "pwm2_enable"), 0)
-        if current_en2 != 1:
-            safe_write(os.path.join(nct_dir, "pwm2_enable"), 1)
+        # Ensure pwm4 is in manual mode
+        current_en4 = safe_read_int(os.path.join(nct_dir, "pwm4_enable"), 0)
+        if current_en4 != 1:
+            safe_write(os.path.join(nct_dir, "pwm4_enable"), 1)
 
-        if abs(target_pwm2 - last_pwm2) >= 3 or (now - last_log_time >= 30):
-            safe_write(os.path.join(nct_dir, "pwm2"), target_pwm2)
-            pct2 = int(round(target_pwm2 / 255.0 * 100))
-            if abs(target_pwm2 - last_pwm2) >= 3:
-                log(f"X570 Aux (pwm2): {pct2}% (PWM {target_pwm2}) at Chipset {chip_temp:.1f}C")
-            last_pwm2 = target_pwm2
+        if abs(target_pwm4 - last_pwm4) >= 3 or (now - last_log_time >= 30):
+            safe_write(os.path.join(nct_dir, "pwm4"), target_pwm4)
+            pct4 = int(round(target_pwm4 / 255.0 * 100))
+            if abs(target_pwm4 - last_pwm4) >= 3:
+                log(f"X570 Aux (pwm4): {pct4}% (PWM {target_pwm4}) at Chipset {chip_temp:.1f}C")
+            last_pwm4 = target_pwm4
             last_log_time = now
 
         # 2. Case Fan Thermal Flush when Chipset exceeds 80 PWM
@@ -171,8 +172,10 @@ def main():
     if nct_dir:
         safe_write(os.path.join(nct_dir, "pwm1_enable"), 5)
         safe_write(os.path.join(nct_dir, "pwm2_enable"), 1)
-        safe_write(os.path.join(nct_dir, "pwm2"), 178)
+        safe_write(os.path.join(nct_dir, "pwm2"), 0)
         safe_write(os.path.join(nct_dir, "pwm3_enable"), 5)
+        safe_write(os.path.join(nct_dir, "pwm4_enable"), 1)
+        safe_write(os.path.join(nct_dir, "pwm4"), 178)
 
 if __name__ == "__main__":
     main()

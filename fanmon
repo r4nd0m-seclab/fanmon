@@ -79,17 +79,17 @@ class HardwareTelemetry:
                 "max_rpm": 2300,
             })
 
-            # Fan 2 (CPU_FAN: X570 Aux Fan - heatsink + bottom GPU)
-            f2_rpm = safe_int(os.path.join(nct_dir, "fan2_input"))
-            f2_pwm = safe_int(os.path.join(nct_dir, "pwm2"))
-            f2_en = safe_int(os.path.join(nct_dir, "pwm2_enable"))
+            # Fan 4 (CHA_FAN3: X570 Aux Fans - two serial-connected fans)
+            f4_rpm = safe_int(os.path.join(nct_dir, "fan4_input"))
+            f4_pwm = safe_int(os.path.join(nct_dir, "pwm4"))
+            f4_en = safe_int(os.path.join(nct_dir, "pwm4_enable"))
             fans.append({
-                "name": "X570 Aux Fan",
-                "role": "CPU_FAN Aux (PWM)",
-                "rpm": f2_rpm,
-                "pwm": f2_pwm,
-                "pwm_pct": int((f2_pwm / 255.0) * 100) if f2_pwm > 0 else 0,
-                "mode": f"Manual {f2_en}" if f2_en == 1 else f"HW Smart {f2_en}",
+                "name": "X570 Aux Fans",
+                "role": "CHA_FAN3 Aux (PWM)",
+                "rpm": f4_rpm,
+                "pwm": f4_pwm,
+                "pwm_pct": int((f4_pwm / 255.0) * 100) if f4_pwm > 0 else 0,
+                "mode": f"Manual {f4_en}" if f4_en == 1 else f"HW Smart {f4_en}",
                 "max_rpm": 2100,
             })
 
@@ -479,7 +479,7 @@ def tui_loop(stdscr):
                 refresh_rate = min(5.0, refresh_rate + 0.2)
                 stdscr.timeout(int(refresh_rate * 1000))
             elif ch in (ord('c'), ord('C')):
-                subprocess.run(["./scripts/apply-fan-curves.sh"], capture_output=True)
+                subprocess.run(["/usr/local/sbin/apply-fan-curves.sh"], capture_output=True)
         except curses.error:
             pass
 
