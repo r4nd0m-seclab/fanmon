@@ -80,6 +80,20 @@ class HardwareTelemetry:
                 "max_rpm": 2300,
             })
 
+            # Fan 2 (CPU_FAN: Top Exhaust Fan - single 120mm top exhaust)
+            f2_rpm = safe_int(os.path.join(nct_dir, "fan2_input"))
+            f2_pwm = safe_int(os.path.join(nct_dir, "pwm2"))
+            f2_en = safe_int(os.path.join(nct_dir, "pwm2_enable"))
+            fans.append({
+                "name": "Top Exhaust Fan",
+                "role": "CPU_FAN Top (PWM)",
+                "rpm": f2_rpm,
+                "pwm": f2_pwm,
+                "pwm_pct": int((f2_pwm / 255.0) * 100) if f2_pwm > 0 else 0,
+                "mode": f"HW Smart {f2_en}" if f2_en == 5 else f"Manual {f2_en}",
+                "max_rpm": 2300,
+            })
+
             # Fan 4 (CHA_FAN3: X570 Aux Fans - two serial-connected fans)
             f4_rpm = safe_int(os.path.join(nct_dir, "fan4_input"))
             f4_pwm = safe_int(os.path.join(nct_dir, "pwm4"))
@@ -274,7 +288,6 @@ def make_bar(pct, width=12):
     filled = int(round((pct / 100.0) * width))
     empty = width - filled
     return "■" * filled + "·" * empty
-
 # --- Rolling temperature trend (histogram) ---------------------------------
 HIST_ORDER = ["X570 PCH", "GPU 0"]
 HIST_GLYPHS = {"X570 PCH": "▪", "GPU 0": "▮"}
@@ -351,6 +364,7 @@ def render_temp_hist(stdscr, y, inner_w, hist):
         safe_addstr(stdscr, y, 1 + label_w + bw, "│", curses.color_pair(1))
         y += 1
     return 5
+
 
 def compute_col_widths(box_w):
     """

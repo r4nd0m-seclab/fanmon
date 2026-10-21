@@ -66,8 +66,8 @@ appear if absent.
 ### 2. Fan curve control (ASUS X570 + NCT6798 example)
 
 The scripts in `scripts/` are tuned for the specific build this was written
-on (NCT6798 PWM1 = rear, PWM3 = front intake, PWM4 = X570 aux, PWM2
-unpopulated; `asusec` for the PCH fan; Kraken 2023 AIO). Adapt the PWM
+on (NCT6798 PWM1 = rear, PWM2 = top exhaust (CPU_FAN), PWM3 = front intake,
+PWM4 = X570 aux; `asusec` for the PCH fan; Kraken 2023 AIO). Adapt the PWM
 values, header assignments, and temperature breakpoints to your board before
 enabling.
 
@@ -94,7 +94,7 @@ no-op so the TUI never crashes on a missing path.
 | Header | Control | Behavior |
 |---|---|---|
 | PWM1 — CHA_FAN1 (rear) | HW SmartFan IV | CPU PECI-tracked: 45 °C → 27 % … 75 °C → 80 % (PWM 204 cap), 85 °C → 100 % failsafe |
-| PWM2 — CPU_FAN (unpopulated) | Off | Header removed from aux cooling; left off (fan2 tach may read phantom RPM) |
+| PWM2 — CPU_FAN (top exhaust) | Manual | Real top-exhaust fan; `fanmon` reads its tach. Currently driven at 100 % manually. Note: the boot `apply-fan-curves.sh` still zeroes `pwm2` (stale "unpopulated" comment) — update it to drive this fan if you want it under the boot curve |
 | PWM3 — CHA_FAN2 (front intake) | HW SmartFan IV | Same curve as PWM1 |
 | PWM4 — CHA_FAN3 (X570 aux, 2 serial fans) | Manual (daemon) | 70 % floor ≤ 55 °C, ramps 70 → 95 % to 70 °C PCH, 100 % above |
 | Kraken pump/fan | NZXT hardware auto | 0-RPM mode below ~36 °C coolant |
