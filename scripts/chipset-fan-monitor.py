@@ -2,17 +2,21 @@
 """
 Chipset Thermal Ramp Daemon
 Monitors X570 chipset fan speed/temp from ASUS EC.
-- pwm1 (CHA_FAN1: Rear Exhaust): Hardware SmartFan IV curve tracking CPU PECI (capped at 80% / 204 PWM).
 - pwm4 (CHA_FAN3: X570 Aux Fans - two serial-connected fans): Managed dynamically tracking X570 chipset temperature.
-    Floor: 70% (PWM 178) at <=50°C
-    50°C - 55°C: 70% (PWM 178)
-    55°C - 65°C: Ramp 70% -> 85% (PWM 178 -> 217)
-    65°C - 70°C: Ramp 85% -> 95% (PWM 217 -> 242)
-    >70°C: 100% (PWM 255)
-- pwm2 (CPU_FAN: UNPOPULATED) - header no longer in use, left off.
-- pwm3 (CHA_FAN2: Front Intake Fans - 3x cluster): Hardware SmartFan IV curve tracking CPU PECI (matching rear, capped at 80% / 204 PWM).
-- If chipset fan enters high-speed ramp (>80 PWM / >2800 RPM), pwm1 (Rear) and pwm3 (Front)
-  are also temporarily boosted to flush case heat, matched and capped at 80% (PWM 204).
+    The aux fan is the fan physically on the PCH heatsink and is the dominant
+    PCH cooler (case fans alone barely move it). Idle band is 60-65C.
+    Floor: 60% (PWM 153) held through idle, i.e. <=65°C
+    65°C - 72°C: Ramp 60% -> 100% (PWM 153 -> 255) so it pins by 72°C
+    >72°C: 100% (PWM 255) pinned, holds PCH in the ~67-72°C band
+- pwm1 (CHA_FAN1: Rear Exhaust) and pwm2 (CPU_FAN: Top Exhaust) are CLAMPED to
+    the aux fan target (pwm4), so the exhaust fans pull PCH heat out in lockstep
+    with the PCH cooler. A CPU safety floor (get_cpu_safety_pwm) is enforced as a
+    lower bound so the CPU is still protected if it runs hot while the PCH is cool.
+- pwm3 (CHA_FAN2: Front Intake Fans - 3x cluster): Hardware SmartFan IV curve
+    tracking CPU PECI (capped at 80% / 204 PWM). FINAL ESCALATION: when the X570
+    chipset passes 85C (everything else is already maxed), the front intake is
+    driven to 100% (PWM 255) manually to shove maximum cool air through the case;
+    when the chipset cools back to <=85C it returns to its hardware CPU curve.
 """
 
 import glob
@@ -99,9 +103,12 @@ def get_cpu_safety_pwm(cpu_t):
         return 204
 
 def main():
-    log("Daemon starting (pwm1=Rear [max 80%], pwm4=X570 Aux, pwm3=Front Intake [max 80%])...")
-    is_case_ramping = False
+    log("Daemon starting (pwm4=X570 Aux, pwm1/pwm2=Rear+Top Exhaust clamped to aux, pwm3=Front Intake [hw CPU curve])...")
+    is_exhaust_clamped = False
+    front_set = False
+    front_escalated = False
     last_pwm4 = -1
+    last_exhaust = -1
     last_log_time = 0
 
     while running:
@@ -116,17 +123,15 @@ def main():
         now = time.time()
 
         # 1. Calculate X570 Aux Fan target PWM (pwm4 on CHA_FAN3 header, two serial fans)
-        # 70% floor is 178 PWM (~1000 RPM)
-        if chip_temp <= 50.0:
-            target_pwm4 = 178
-        elif chip_temp <= 55.0:
-            target_pwm4 = 178
-        elif chip_temp <= 65.0:
-            frac = (chip_temp - 55.0) / 10.0
-            target_pwm4 = int(178 + frac * 39)  # 178 -> 217 (85%)
-        elif chip_temp <= 70.0:
-            frac = (chip_temp - 65.0) / 5.0
-            target_pwm4 = int(217 + frac * 25)  # 217 -> 242 (95%)
+        # 60% floor is 153 PWM (~850 RPM), held through the 60-65C idle band.
+        # The aux fan is the fan physically on the PCH heatsink, so it is the
+        # dominant PCH cooler (case fans alone do little). Reworked to slam to
+        # 100% by 72C so the chipset never creeps into the 80-84C WHEA-error zone.
+        if chip_temp <= 65.0:
+            target_pwm4 = 153
+        elif chip_temp <= 72.0:
+            frac = (chip_temp - 65.0) / 7.0
+            target_pwm4 = int(153 + frac * 102)  # 153 -> 255 (100%)
         else:
             target_pwm4 = 255
 
@@ -143,27 +148,46 @@ def main():
             last_pwm4 = target_pwm4
             last_log_time = now
 
-        # 2. Case Fan Thermal Flush when Chipset exceeds 80 PWM
-        # Both Rear Exhaust (pwm1) and Front Intake (pwm3) match, ramping up to 80% max (PWM 204)
-        if chip_pwm > 80.0:
-            ratio = min(1.0, max(0.0, (chip_pwm - 80.0) / 20.0))
-            cpu_t = get_cpu_temp(nct_dir, k10_dir)
-
-            boost_pwm = int(round(70 + ratio * (204 - 70)))
-            cpu_floor = get_cpu_safety_pwm(cpu_t)
-            boost_pwm = min(204, max(boost_pwm, cpu_floor))
-
-            safe_write(os.path.join(nct_dir, "pwm1_enable"), 1)
-            safe_write(os.path.join(nct_dir, "pwm1"), boost_pwm)
-            safe_write(os.path.join(nct_dir, "pwm3_enable"), 1)
-            safe_write(os.path.join(nct_dir, "pwm3"), boost_pwm)
-            is_case_ramping = True
+        # 2. Front Intake (pwm3): normally on its hardware CPU-tracking curve.
+        #    FINAL ESCALATION: when the chipset passes 85C (aux + exhaust already
+        #    maxed), drive the front intake to 100% to shove max cool air through.
+        if chip_temp > 85.0:
+            if not front_escalated:
+                log(f"Chipset {chip_temp:.1f}C > 85C. Driving Front Intake (pwm3) to 100% (final escalation).")
+                safe_write(os.path.join(nct_dir, "pwm3_enable"), 1)
+                safe_write(os.path.join(nct_dir, "pwm3"), 255)
+                front_escalated = True
+                front_set = True
         else:
-            if is_case_ramping:
-                log(f"Chipset cooled ({chip_rpm} RPM). Restoring Hardware SmartFan IV curves on pwm1/pwm3.")
-                safe_write(os.path.join(nct_dir, "pwm1_enable"), 5)
+            if front_escalated:
+                log(f"Chipset cooled to {chip_temp:.1f}C (<=85C). Restoring Front Intake (pwm3) to hardware CPU curve.")
                 safe_write(os.path.join(nct_dir, "pwm3_enable"), 5)
-                is_case_ramping = False
+                front_escalated = False
+            elif not front_set:
+                # Normal (non-escalated) startup: put front on its hardware curve.
+                safe_write(os.path.join(nct_dir, "pwm3_enable"), 5)
+                front_set = True
+
+        # 3. Clamp Rear Exhaust (pwm1) + Top Exhaust (pwm2) to the aux fan target
+        #    (pwm4), so the exhaust pulls PCH heat out in lockstep with the PCH
+        #    cooler. Enforce the CPU safety floor as a lower bound so the CPU is
+        #    still protected if it runs hot while the PCH is cool.
+        cpu_t = get_cpu_temp(nct_dir, k10_dir)
+        cpu_floor = get_cpu_safety_pwm(cpu_t)
+        exhaust_pwm = max(target_pwm4, cpu_floor)
+
+        safe_write(os.path.join(nct_dir, "pwm1_enable"), 1)
+        safe_write(os.path.join(nct_dir, "pwm2_enable"), 1)
+        if abs(exhaust_pwm - last_exhaust) >= 3 or (now - last_log_time >= 30):
+            safe_write(os.path.join(nct_dir, "pwm1"), exhaust_pwm)
+            safe_write(os.path.join(nct_dir, "pwm2"), exhaust_pwm)
+            pct = int(round(exhaust_pwm / 255.0 * 100))
+            if abs(exhaust_pwm - last_exhaust) >= 3:
+                floor_note = " (CPU floor)" if cpu_floor > target_pwm4 else ""
+                log(f"Rear+Top Exhaust (pwm1/pwm2): {pct}% (PWM {exhaust_pwm}) clamped to aux{floor_note} at Chipset {chip_temp:.1f}C")
+            last_exhaust = exhaust_pwm
+            last_log_time = now
+        is_exhaust_clamped = True
 
         time.sleep(2)
 
@@ -171,11 +195,10 @@ def main():
     nct_dir, _, _ = find_hwmons()
     if nct_dir:
         safe_write(os.path.join(nct_dir, "pwm1_enable"), 5)
-        safe_write(os.path.join(nct_dir, "pwm2_enable"), 1)
-        safe_write(os.path.join(nct_dir, "pwm2"), 0)
+        safe_write(os.path.join(nct_dir, "pwm2_enable"), 5)
         safe_write(os.path.join(nct_dir, "pwm3_enable"), 5)
         safe_write(os.path.join(nct_dir, "pwm4_enable"), 1)
-        safe_write(os.path.join(nct_dir, "pwm4"), 178)
+        safe_write(os.path.join(nct_dir, "pwm4"), 153)
 
 if __name__ == "__main__":
     main()

@@ -96,13 +96,16 @@ no-op so the TUI never crashes on a missing path.
 | PWM1 — CHA_FAN1 (rear) | HW SmartFan IV | CPU PECI-tracked: 45 °C → 27 % … 75 °C → 80 % (PWM 204 cap), 85 °C → 100 % failsafe |
 | PWM2 — CPU_FAN (top exhaust) | HW SmartFan IV | Real top-exhaust fan; `fanmon` reads its tach. Driven at boot by the same CPU-PECI curve as PWM1/PWM3 (80 % max, PWM 204 cap) |
 | PWM3 — CHA_FAN2 (front intake) | HW SmartFan IV | Same curve as PWM1 |
-| PWM4 — CHA_FAN3 (X570 aux, 2 serial fans) | Manual (daemon) | 70 % floor ≤ 55 °C, ramps 70 → 95 % to 70 °C PCH, 100 % above |
+| PWM4 — CHA_FAN3 (X570 aux, 2 serial fans) | Manual (daemon) | 60 % floor (PWM 153) held ≤ 65 °C, ramps to 100 % by 72 °C, pinned above |
 | Kraken pump/fan | NZXT hardware auto | 0-RPM mode below ~36 °C coolant |
 
-When the PCH fan RPM exceeds ~80 % (≈ 2800 RPM), `chipset-fan-monitor.py`
-temporarily takes manual control of PWM1/PWM3 and boosts them in lockstep
-with a CPU-temperature floor, then hands control back to the hardware
-curves when the PCH cools.
+`chipset-fan-monitor.py` drives the X570 aux fan (PWM4) by PCH temperature
+(60 % floor through idle, ramping to 100 % by 72 °C), then **clamps the two
+exhaust fans — Rear (PWM1) + Top Exhaust (PWM2) — to that aux target** with a
+CPU-temperature safety floor as a lower bound, so the exhaust pulls PCH heat
+out in lockstep with the PCH cooler. The Front Intake (PWM3) normally rides
+its hardware CPU curve, but is driven to 100 % as a final escalation while the
+chipset is above 85 °C, then restored to its hardware curve when it cools.
 
 ## Notes
 
