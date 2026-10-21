@@ -17,6 +17,10 @@ components simply don't show up.
 - **One screen, no scrolling** — box-drawn table with per-fan activity bars,
   color-coded by load, plus a telemetry pill bar (CPU / Coolant / Chipset /
   GPU temps, PSU draw, curve-service status).
+- **Rolling temp trend** — a 200-sample (≈3.3 min @ 1 s) histogram tracks
+  **X570 chipset** and **GPU 0** temps on a shared adaptive scale; the two
+  traces are glyph+color-coded (X570 = white `▪`, GPU = magenta `▮`), newest
+  sample on the right. Hidden automatically on short terminals.
 - **Dynamic hwmon discovery** — finds `nct*`, `kraken*`, `asusec`, `k10temp`,
   `corsairpsu` hwmon chips at runtime (5 s re-discovery cadence); no
   hardcoded device paths.

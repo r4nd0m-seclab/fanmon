@@ -11,6 +11,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections import deque
 
 def safe_read(path, default=""):
     try:
@@ -274,6 +275,83 @@ def make_bar(pct, width=12):
     empty = width - filled
     return "■" * filled + "·" * empty
 
+# --- Rolling temperature trend (histogram) ---------------------------------
+HIST_ORDER = ["X570 PCH", "GPU 0"]
+HIST_GLYPHS = {"X570 PCH": "▪", "GPU 0": "▮"}
+HIST_SHORT = {"X570 PCH": "X570", "GPU 0": "GPU"}
+HIST_MAXLEN = 200
+
+def pick_hist_temps(temps):
+    """Map the tracked series (X570 PCH, GPU 0) out of the current temps list."""
+    out = {}
+    for t in temps:
+        lbl = t["label"]
+        if "Chipset" in lbl:
+            out["X570 PCH"] = t["temp"]
+        elif lbl.startswith("GPU 0"):
+            out["GPU 0"] = t["temp"]
+    return out
+
+def render_temp_hist(stdscr, y, inner_w, hist):
+    """
+    Draw a 5-row rolling temp trend block:
+      row 0: header with adaptive scale + per-series current value legend
+      rows 1-4: stacked strip, one row per height level (4..1), newest sample
+                at the right. Cell glyph shows which series are at/above that
+                level; both series in one cell -> bold.
+    Returns rows drawn (always 5).
+    """
+    label_w = 12
+    bw = max(20, inner_w - label_w)
+
+    deqs = [hist[k] for k in HIST_ORDER]
+    vals = [v for d in deqs for v in d]
+    if vals:
+        tmin = max(30.0, min(vals) - 2.0)
+        tmax = max(tmin + 10.0, max(vals) + 2.0)
+    else:
+        tmin, tmax = 30.0, 80.0
+    span = tmax - tmin
+
+    cur = {k: (list(hist[k])[-1] if hist[k] else 0.0) for k in HIST_ORDER}
+    legend = "  ".join(
+        f"{HIST_GLYPHS[k]} {HIST_SHORT[k]} {cur[k]:4.1f}°" for k in HIST_ORDER
+    )
+    hdr = f" Temp Trend  ({tmin:.0f}–{tmax:.0f} °C · {HIST_MAXLEN} samples)   {legend}"
+    right = 1 + label_w + bw
+    safe_addstr(stdscr, y, 0, "│", curses.color_pair(1))
+    safe_addstr(stdscr, y, 1, hdr.ljust(right - 1), curses.color_pair(1) | curses.A_BOLD)
+    safe_addstr(stdscr, y, right, "│", curses.color_pair(1))
+    y += 1
+
+    # Per-series level per column (0..4); newest sample = rightmost column.
+    levels = []
+    for k in HIST_ORDER:
+        seq = list(hist[k])[-bw:]
+        lvl = [max(0, min(4, int((v - tmin) / span * 4 + 0.5))) for v in seq]
+        lvl = [0] * (bw - len(lvl)) + lvl   # right-pad so newest is at the right
+        levels.append(lvl)
+
+    x_attr = curses.color_pair(5)   # X570 PCH (white)
+    g_attr = curses.color_pair(6)   # GPU 0 (magenta)
+    for l in (4, 3, 2, 1):
+        safe_addstr(stdscr, y, 0, "│", curses.color_pair(1))
+        safe_addstr(stdscr, y, 1, " " * label_w, curses.color_pair(5))
+        x = 1 + label_w
+        for j in range(bw):
+            on_x = levels[0][j] >= l
+            on_g = levels[1][j] >= l
+            if on_x and on_g:
+                safe_addstr(stdscr, y, x, "▮", g_attr | curses.A_BOLD)
+            elif on_x:
+                safe_addstr(stdscr, y, x, "▪", x_attr)
+            elif on_g:
+                safe_addstr(stdscr, y, x, "▮", g_attr)
+            x += 1
+        safe_addstr(stdscr, y, 1 + label_w + bw, "│", curses.color_pair(1))
+        y += 1
+    return 5
+
 def compute_col_widths(box_w):
     """
     Returns (c1, c2, c3, c4, c5, c6) such that:
@@ -323,6 +401,7 @@ def tui_loop(stdscr):
     telemetry = HardwareTelemetry()
     refresh_rate = 1.0
     paused = False
+    hist = {k: deque(maxlen=HIST_MAXLEN) for k in HIST_ORDER}
 
     while True:
         h, w = stdscr.getmaxyx()
@@ -343,6 +422,13 @@ def tui_loop(stdscr):
         inner_w = box_w - 2
 
         fans, temps, sysinfo = telemetry.read_all()
+
+        # Append to the rolling temp-trend buffers (X570 PCH + GPU 0)
+        if not paused:
+            cur_temps = pick_hist_temps(temps)
+            for k in HIST_ORDER:
+                if k in cur_temps:
+                    hist[k].append(cur_temps[k])
 
         # 1. Header Banner
         title = " FANMON — Real-Time Thermal & Fan Telemetry "
@@ -447,6 +533,13 @@ def tui_loop(stdscr):
                 break
             safe_addstr(stdscr, row_y, 0, "│ " + l.ljust(inner_w - 1) + "│", curses.color_pair(5))
             row_y += 1
+
+        # 6b. Rolling temp trend (X570 PCH + GPU 0) — only if it fits
+        hist_rows = 5
+        if row_y + hist_rows + 3 < h:
+            safe_addstr(stdscr, row_y, 0, "├" + "─" * inner_w + "┤", curses.color_pair(1))
+            row_y += 1
+            row_y += render_temp_hist(stdscr, row_y, inner_w, hist)
 
         # 7. Bottom Instructions / Footer
         safe_addstr(stdscr, row_y, 0, "├" + "─" * inner_w + "┤", curses.color_pair(1))
