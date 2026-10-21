@@ -30,10 +30,20 @@ if [ -n "$NCT_DIR" ]; then
     echo 85000 > "$NCT_DIR/pwm1_auto_point5_temp"   # 85C
     echo 5     > "$NCT_DIR/pwm1_enable"
 
-    # PWM2 (CPU_FAN: UNPOPULATED - header removed from aux cooling)
-    # Kept off. fan2 tach may read phantom RPM on the floating sense line.
-    echo 1     > "$NCT_DIR/pwm2_enable" 2>/dev/null || true
-    echo 0     > "$NCT_DIR/pwm2" 2>/dev/null || true
+    # PWM2 (CPU_FAN: Top Exhaust Fan - single 120mm top exhaust)
+    # Hardware SmartFan IV curve tracking CPU PECI (temp8) - matching rear/front at 80% max (PWM 204)
+    echo 8     > "$NCT_DIR/pwm2_temp_sel"
+    echo 70    > "$NCT_DIR/pwm2_auto_point1_pwm"    # ~27% floor (~830 RPM)
+    echo 45000 > "$NCT_DIR/pwm2_auto_point1_temp"   # 45C
+    echo 115   > "$NCT_DIR/pwm2_auto_point2_pwm"    # ~45%
+    echo 55000 > "$NCT_DIR/pwm2_auto_point2_temp"   # 55C
+    echo 160   > "$NCT_DIR/pwm2_auto_point3_pwm"    # ~63%
+    echo 65000 > "$NCT_DIR/pwm2_auto_point3_temp"   # 65C
+    echo 204   > "$NCT_DIR/pwm2_auto_point4_pwm"    # ~80% max operational speed
+    echo 75000 > "$NCT_DIR/pwm2_auto_point4_temp"   # 75C
+    echo 255   > "$NCT_DIR/pwm2_auto_point5_pwm"    # Critical hardware safety fail-safe ceiling
+    echo 85000 > "$NCT_DIR/pwm2_auto_point5_temp"   # 85C
+    echo 5     > "$NCT_DIR/pwm2_enable"
 
     # PWM3 (CHA_FAN2: Front Intake Fans - 3x daisy-chained cluster)
     # Hardware SmartFan IV curve tracking CPU PECI (temp8) - matching rear at 80% max (PWM 204)
