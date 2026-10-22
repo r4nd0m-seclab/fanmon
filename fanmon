@@ -399,6 +399,35 @@ def make_bar(pct, width=12):
     filled = int(round((pct / 100.0) * width))
     empty = width - filled
     return "■" * filled + "·" * empty
+
+def pill_lines(items, width):
+    """Split the telemetry pill list into at most two lines, breaking only at
+    a '  •  ' separator so no line starts/ends with a dangling bullet. Keeps
+    each line within `width` and balances the two lengths. Returns 1-2 lines
+    (each already carries its leading space)."""
+    sep = "  •  "
+    def prefix_len(k):
+        return 1 + sum(len(x) for x in items[:k]) + len(sep) * (k - 1)
+    total = 1 + sum(len(x) for x in items) + len(sep) * max(0, len(items) - 1)
+    if total <= width:
+        return [" " + sep.join(items)]
+    best_k, best_diff = None, None
+    for k in range(1, len(items)):
+        l1 = prefix_len(k)
+        rest = items[k:]
+        l2 = 1 + sum(len(x) for x in rest) + len(sep) * max(0, len(rest) - 1)
+        if l1 <= width and l2 <= width:
+            diff = abs(l1 - l2)
+            if best_diff is None or diff < best_diff:
+                best_k, best_diff = k, diff
+    if best_k is None:
+        # Too narrow for a clean separator split; hard-cut the joined text.
+        full = " " + sep.join(items)
+        cut = full.rfind(" ", 0, width + 1)
+        if cut <= 0:
+            cut = width
+        return [full[:cut].rstrip(), full[cut:].strip()[:width].rstrip()]
+    return [" " + sep.join(items[:best_k]), " " + sep.join(items[best_k:])]
 # --- Rolling temperature trend (histogram) ---------------------------------
 HIST_ORDER = ["X570 PCH", "GPU 0"]
 HIST_GLYPHS = {"X570 PCH": "▪", "GPU 0": "▮"}
@@ -532,7 +561,7 @@ def tui_loop(stdscr):
         h, w = stdscr.getmaxyx()
         stdscr.erase()
 
-        if h < 14 or w < 65:
+        if h < 15 or w < 65:
             safe_addstr(stdscr, 0, 0, f"Window too small ({w}x{h}). Resize to at least 70x16.", curses.A_BOLD)
             stdscr.refresh()
             time.sleep(0.5)
@@ -586,14 +615,19 @@ def tui_loop(stdscr):
         svc_status = sysinfo.get("curve_service", "unknown")
         pill_items.append(f"SmartFan Curve: {svc_status.upper()}")
 
-        pill_text = " " + "  •  ".join(pill_items)
-        if len(pill_text) > inner_w:
-            pill_text = pill_text[:inner_w].rstrip()
-        safe_addstr(stdscr, 3, 0, "│" + pill_text.ljust(inner_w) + "│", curses.color_pair(6) | curses.A_BOLD)
+        # Two rows tall so every pill fits without clipping: the box is clamped
+        # to 120 cols, so the full pill set exceeds one line. Height is stable
+        # (the second row is drawn blank when everything fits on one line) so
+        # the layout never jitters as values change.
+        p2 = pill_lines(pill_items, inner_w)
+        while len(p2) < 2:
+            p2.append("")
+        safe_addstr(stdscr, 3, 0, "│" + p2[0].ljust(inner_w) + "│", curses.color_pair(6) | curses.A_BOLD)
+        safe_addstr(stdscr, 4, 0, "│" + p2[1].ljust(inner_w) + "│", curses.color_pair(6) | curses.A_BOLD)
 
         # 3. Table Transition Header (with ┬ dividers aligned to columns)
         top_table_div = "├" + "─"*c1 + "┬" + "─"*c2 + "┬" + "─"*c3 + "┬" + "─"*c4 + "┬" + "─"*c5 + "┬" + "─"*c6 + "┤"
-        safe_addstr(stdscr, 4, 0, top_table_div, curses.color_pair(1))
+        safe_addstr(stdscr, 5, 0, top_table_div, curses.color_pair(1))
 
         col_name = "Fan Header / Device"
         col_rpm = "Speed"
@@ -603,13 +637,13 @@ def tui_loop(stdscr):
         col_status = "Status / Acoustic Level"
 
         table_header = f"│ {col_name:<{c1-2}} │ {col_rpm:>{c2-2}} │ {col_pwm:>{c3-2}} │ {col_bar:<{c4-2}} │ {col_mode:<{c5-2}} │ {col_status:<{c6-2}} │"
-        safe_addstr(stdscr, 5, 0, table_header, curses.color_pair(1) | curses.A_BOLD)
+        safe_addstr(stdscr, 6, 0, table_header, curses.color_pair(1) | curses.A_BOLD)
 
         row_div = "├" + "─"*c1 + "┼" + "─"*c2 + "┼" + "─"*c3 + "┼" + "─"*c4 + "┼" + "─"*c5 + "┼" + "─"*c6 + "┤"
-        safe_addstr(stdscr, 6, 0, row_div, curses.color_pair(1))
+        safe_addstr(stdscr, 7, 0, row_div, curses.color_pair(1))
 
         # 4. Fans Data Rows
-        row_y = 7
+        row_y = 8
         for fan in fans:
             if row_y >= h - 7:
                 break
@@ -766,10 +800,11 @@ def print_once():
         ptot = px["correctable"] + px["nonfatal"] + px["fatal"]
         pills.append(f"PCIe X570: {ptot}" + ("" if ptot == 0 else " ⚠"))
     pills.append(f"Curve Service: {sysinfo.get('curve_service', 'unknown').upper()}")
-    pill_text = " " + "  •  ".join(pills)
-    if len(pill_text) > inner_w:
-        pill_text = pill_text[:inner_w].rstrip()
-    print("│" + pill_text.ljust(inner_w) + "│")
+    p2 = pill_lines(pills, inner_w)
+    while len(p2) < 2:
+        p2.append("")
+    print("│" + p2[0].ljust(inner_w) + "│")
+    print("│" + p2[1].ljust(inner_w) + "│")
 
     # Table top transition
     print("├" + "─"*c1 + "┬" + "─"*c2 + "┬" + "─"*c3 + "┬" + "─"*c4 + "┬" + "─"*c5 + "┬" + "─"*c6 + "┤")
