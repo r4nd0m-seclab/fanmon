@@ -587,6 +587,8 @@ def tui_loop(stdscr):
         pill_items.append(f"SmartFan Curve: {svc_status.upper()}")
 
         pill_text = " " + "  •  ".join(pill_items)
+        if len(pill_text) > inner_w:
+            pill_text = pill_text[:inner_w].rstrip()
         safe_addstr(stdscr, 3, 0, "│" + pill_text.ljust(inner_w) + "│", curses.color_pair(6) | curses.A_BOLD)
 
         # 3. Table Transition Header (with ┬ dividers aligned to columns)
@@ -670,36 +672,35 @@ def tui_loop(stdscr):
             row_y += 1
             row_y += render_temp_hist(stdscr, row_y, inner_w, hist)
 
-        # 6c. PCIe Bus Health (X570 / PCH subtree) — only if it fits
+        # 6c. PCIe Bus Health (X570 / PCH subtree) — only if it fits.
+        # Box interior is inner_w wide; the right border lives at column
+        # inner_w+1 (see the "┌" + "─"*inner_w + "┐" header). Every content
+        # row is drawn as: left │ @0, content @1..inner_w, right │ @inner_w+1.
         px = sysinfo.get("pcie_x570")
         if px and px.get("ok") and row_y + 4 < h:
+            rb = inner_w + 1
+            def pcy(y, text, attr):
+                safe_addstr(stdscr, y, 0, "│", curses.color_pair(1))
+                safe_addstr(stdscr, y, 1, text[:inner_w].ljust(inner_w), attr)
+                safe_addstr(stdscr, y, rb, "│", curses.color_pair(1))
             safe_addstr(stdscr, row_y, 0, "├" + "─" * inner_w + "┤", curses.color_pair(1))
             row_y += 1
             cor, nf, f = px["correctable"], px["nonfatal"], px["fatal"]
             tot = cor + nf + f
             hdr = (f" PCIe Bus Health (X570/PCH subtree)  ·  PCH {px['pch']} "
                    f"· CPU↔PCH link {px['link']} · {px['devices_scanned']} AER ports")
-            safe_addstr(stdscr, row_y, 0, "│", curses.color_pair(1))
-            safe_addstr(stdscr, row_y, 1, hdr.ljust(inner_w - 1), curses.color_pair(1) | curses.A_BOLD)
-            safe_addstr(stdscr, row_y, inner_w, "│", curses.color_pair(1))
-            row_y += 1
+            pcy(row_y, hdr, curses.color_pair(1) | curses.A_BOLD); row_y += 1
             if tot == 0:
                 status, attr = "OK — 0 errors since boot", curses.color_pair(2)
             elif f == 0 and nf == 0:
                 status, attr = "CORRECTABLE only (recovered by retry)", curses.color_pair(3)
             else:
                 status, attr = "UNCORRECTABLE — link degradation likely", curses.color_pair(4) | curses.A_BOLD
-            line = f"   Correctable {cor}  ·  Non-Fatal {nf}  ·  Fatal {f}   →  {status}"
-            safe_addstr(stdscr, row_y, 0, "│", curses.color_pair(1))
-            safe_addstr(stdscr, row_y, 1, line.ljust(inner_w - 1), attr)
-            safe_addstr(stdscr, row_y, inner_w, "│", curses.color_pair(1))
+            pcy(row_y, f"   Correctable {cor}  ·  Non-Fatal {nf}  ·  Fatal {f}   →  {status}", attr)
             row_y += 1
             if px["detail"]:
                 det = "  ·  ".join(f"{bdf[5:]} {c}c/{n2}nf/{f2}f" for (bdf, c, n2, f2) in px["detail"])
-                safe_addstr(stdscr, row_y, 0, "│", curses.color_pair(1))
-                safe_addstr(stdscr, row_y, 1, ("   nonzero: " + det).ljust(inner_w - 1), curses.color_pair(3))
-                safe_addstr(stdscr, row_y, inner_w, "│", curses.color_pair(1))
-                row_y += 1
+                pcy(row_y, "   nonzero: " + det, curses.color_pair(3)); row_y += 1
 
         # 7. Bottom Instructions / Footer
         safe_addstr(stdscr, row_y, 0, "├" + "─" * inner_w + "┤", curses.color_pair(1))
@@ -766,6 +767,8 @@ def print_once():
         pills.append(f"PCIe X570: {ptot}" + ("" if ptot == 0 else " ⚠"))
     pills.append(f"Curve Service: {sysinfo.get('curve_service', 'unknown').upper()}")
     pill_text = " " + "  •  ".join(pills)
+    if len(pill_text) > inner_w:
+        pill_text = pill_text[:inner_w].rstrip()
     print("│" + pill_text.ljust(inner_w) + "│")
 
     # Table top transition
@@ -796,15 +799,17 @@ def print_once():
         print("├" + "─" * inner_w + "┤")
         cor, nf, f = px["correctable"], px["nonfatal"], px["fatal"]
         tot = cor + nf + f
-        print("│ PCIe Bus Health (X570/PCH subtree) · PCH %s · CPU↔PCH link %s · %d AER ports"
-              % (px["pch"], px["link"], px["devices_scanned"]))
+        hdr = (" PCIe Bus Health (X570/PCH subtree) · PCH %s · CPU↔PCH link %s · %d AER ports"
+               % (px["pch"], px["link"], px["devices_scanned"]))
+        print("│" + hdr[:inner_w].ljust(inner_w) + "│")
         status = "OK — 0 errors since boot" if tot == 0 else (
                  "CORRECTABLE only (recovered)" if f == 0 and nf == 0 else
                  "UNCORRECTABLE — link degradation likely")
-        print("│   Correctable %d  ·  Non-Fatal %d  ·  Fatal %d   →  %s" % (cor, nf, f, status))
+        line = "   Correctable %d  ·  Non-Fatal %d  ·  Fatal %d   →  %s" % (cor, nf, f, status)
+        print("│" + line[:inner_w].ljust(inner_w) + "│")
         if px["detail"]:
             det = "  ·  ".join("%s %dc/%dnf/%df" % (b[5:], c, n2, f2) for (b, c, n2, f2) in px["detail"])
-            print("│   nonzero: " + det)
+            print("│" + ("   nonzero: " + det)[:inner_w].ljust(inner_w) + "│")
     print("├" + "─" * inner_w + "┤")
     footer = " [q] Quit  [r] Refresh  [p] Pause  [+/-] Rate: 1.0s  [c] Re-apply Curves"
     print("│" + footer.ljust(inner_w) + "│")
