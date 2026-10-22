@@ -34,11 +34,116 @@ def safe_float(path, default=0.0):
     except ValueError:
         return default
 
+# --- PCIe / AER (X570 PCH subtree) ----------------------------------------
+# Unprivileged: AER counters are world-readable sysfs files, same class as
+# the hwmon inputs this app already reads. No root required.
+PCI_PCH_VENDOR = "0x1022"     # AMD
+PCI_PCH_DEVICE = "0x57ad"     # "Matisse Switch Upstream" = the X570 PCH
+
+def _bdf_bus(bdf):
+    # "0000:03:00.0" -> "03"
+    return bdf.split(":")[1]
+
+def _pci_tree():
+    """bdf -> (vendor, device, is_bridge, secondary_bus_or_None). Built once;
+    PCI topology is static at runtime. A device is a PCI-to-PCI bridge if its
+    class code is 0x0604 (base class 0x06 'Bridge', subclass 04). The secondary
+    bus number lives in the device's own secondary_bus_number file (portable;
+    /sys/bus/pci/bridges is not always present)."""
+    tree = {}
+    for p in glob.glob("/sys/bus/pci/devices/*"):
+        bdf = os.path.basename(p)
+        v = safe_read(os.path.join(p, "vendor"))
+        dv = safe_read(os.path.join(p, "device"))
+        cls = safe_read(os.path.join(p, "class"))          # e.g. "0x060400"
+        isb = False
+        sec = None
+        if cls.lower().startswith("0x0604"):
+            isb = True
+            raw = safe_read(os.path.join(p, "secondary_bus_number"), "")
+            try:
+                sec = int(raw)
+            except ValueError:
+                sec = None
+        tree[bdf] = (v, dv, isb, sec)
+    return tree
+
+def _aer_counts(bdf):
+    """(correctable, nonfatal, fatal) for one device, or None if it has no AER
+    capability. Reads TOTAL_ERR_* lines (space-separated 'KEY <int>')."""
+    d = os.path.join("/sys/bus/pci/devices", bdf)
+    if not os.path.isfile(os.path.join(d, "aer_dev_correctable")):
+        return None
+    def tot(fn, key):
+        for line in safe_read(os.path.join(d, fn), "").splitlines():
+            p = line.split()
+            if len(p) == 2 and p[0] == key:
+                try:
+                    return int(p[1])
+                except ValueError:
+                    return 0
+        return 0
+    return (tot("aer_dev_correctable", "TOTAL_ERR_COR"),
+            tot("aer_dev_nonfatal", "TOTAL_ERR_NONFATAL"),
+            tot("aer_dev_fatal", "TOTAL_ERR_FATAL"))
+
 class HardwareTelemetry:
     def __init__(self):
         self.hwmon_map = {}
         self.last_discovery = 0
+        self.pci_tree = _pci_tree()
         self.discover_hwmon()
+
+    def read_pcie_x570(self):
+        """Sum AER counters across the X570 PCH subtree + the CPU<->PCH link.
+        Locates the PCH by device ID (robust to BDF reshuffle), then walks its
+        downstream bus tree. Returns a dict; 'ok' is True if any AER-capable
+        device was found in the subtree."""
+        r = {"ok": False, "correctable": 0, "nonfatal": 0, "fatal": 0,
+             "devices_scanned": 0, "pch": None, "link": None, "detail": []}
+        tree = self.pci_tree
+        pch = None
+        for bdf, (v, dv, isb, sec) in tree.items():
+            if v == PCI_PCH_VENDOR and dv == PCI_PCH_DEVICE:
+                pch = bdf
+                break
+        if not pch:
+            return r
+        r["pch"] = pch
+        pch_bus = _bdf_bus(pch).lower()
+        # CPU<->PCH GPP bridge: a bus-00 bridge whose secondary bus is the PCH bus.
+        link = None
+        for bdf, (v, dv, isb, sec) in tree.items():
+            if isb and sec is not None and _bdf_bus(bdf) == "00" and format(sec, "02x") == pch_bus:
+                link = bdf
+                break
+        r["link"] = link
+        # Recursively collect every device downstream of the PCH.
+        seen = set()
+        def walk(busnum):
+            b = format(busnum, "02x")
+            for bdf, (v, dv, isb, sec) in tree.items():
+                if _bdf_bus(bdf).lower() == b and bdf not in seen:
+                    seen.add(bdf)
+                    if isb and sec is not None:
+                        walk(sec)
+        if tree[pch][3] is not None:
+            walk(tree[pch][3])
+        if link:
+            seen.add(link)
+        for bdf in sorted(seen):
+            c = _aer_counts(bdf)
+            if c is None:
+                continue
+            cor, nf, f = c
+            r["ok"] = True
+            r["devices_scanned"] += 1
+            r["correctable"] += cor
+            r["nonfatal"] += nf
+            r["fatal"] += f
+            if cor or nf or f:
+                r["detail"].append((bdf, cor, nf, f))
+        return r
 
     def discover_hwmon(self):
         now = time.time()
@@ -254,6 +359,12 @@ class HardwareTelemetry:
         except Exception:
             system_info["curve_service"] = "unknown"
 
+        # X570 PCH subtree PCIe / AER health (unprivileged sysfs)
+        try:
+            system_info["pcie_x570"] = self.read_pcie_x570()
+        except Exception:
+            system_info["pcie_x570"] = None
+
         return fans, temps, system_info
 
 def get_status_str(item):
@@ -468,6 +579,10 @@ def tui_loop(stdscr):
 
         if "psu_power" in sysinfo:
             pill_items.append(f"Power: {sysinfo['psu_power']}")
+        px = sysinfo.get("pcie_x570")
+        if px and px.get("ok"):
+            ptot = px["correctable"] + px["nonfatal"] + px["fatal"]
+            pill_items.append(f"PCIe X570: {ptot}" + ("" if ptot == 0 else " ⚠"))
         svc_status = sysinfo.get("curve_service", "unknown")
         pill_items.append(f"SmartFan Curve: {svc_status.upper()}")
 
@@ -555,6 +670,37 @@ def tui_loop(stdscr):
             row_y += 1
             row_y += render_temp_hist(stdscr, row_y, inner_w, hist)
 
+        # 6c. PCIe Bus Health (X570 / PCH subtree) — only if it fits
+        px = sysinfo.get("pcie_x570")
+        if px and px.get("ok") and row_y + 4 < h:
+            safe_addstr(stdscr, row_y, 0, "├" + "─" * inner_w + "┤", curses.color_pair(1))
+            row_y += 1
+            cor, nf, f = px["correctable"], px["nonfatal"], px["fatal"]
+            tot = cor + nf + f
+            hdr = (f" PCIe Bus Health (X570/PCH subtree)  ·  PCH {px['pch']} "
+                   f"· CPU↔PCH link {px['link']} · {px['devices_scanned']} AER ports")
+            safe_addstr(stdscr, row_y, 0, "│", curses.color_pair(1))
+            safe_addstr(stdscr, row_y, 1, hdr.ljust(inner_w - 1), curses.color_pair(1) | curses.A_BOLD)
+            safe_addstr(stdscr, row_y, inner_w, "│", curses.color_pair(1))
+            row_y += 1
+            if tot == 0:
+                status, attr = "OK — 0 errors since boot", curses.color_pair(2)
+            elif f == 0 and nf == 0:
+                status, attr = "CORRECTABLE only (recovered by retry)", curses.color_pair(3)
+            else:
+                status, attr = "UNCORRECTABLE — link degradation likely", curses.color_pair(4) | curses.A_BOLD
+            line = f"   Correctable {cor}  ·  Non-Fatal {nf}  ·  Fatal {f}   →  {status}"
+            safe_addstr(stdscr, row_y, 0, "│", curses.color_pair(1))
+            safe_addstr(stdscr, row_y, 1, line.ljust(inner_w - 1), attr)
+            safe_addstr(stdscr, row_y, inner_w, "│", curses.color_pair(1))
+            row_y += 1
+            if px["detail"]:
+                det = "  ·  ".join(f"{bdf[5:]} {c}c/{n2}nf/{f2}f" for (bdf, c, n2, f2) in px["detail"])
+                safe_addstr(stdscr, row_y, 0, "│", curses.color_pair(1))
+                safe_addstr(stdscr, row_y, 1, ("   nonzero: " + det).ljust(inner_w - 1), curses.color_pair(3))
+                safe_addstr(stdscr, row_y, inner_w, "│", curses.color_pair(1))
+                row_y += 1
+
         # 7. Bottom Instructions / Footer
         safe_addstr(stdscr, row_y, 0, "├" + "─" * inner_w + "┤", curses.color_pair(1))
         row_y += 1
@@ -614,6 +760,10 @@ def print_once():
         elif "Chipset" in t["label"]: pills.append(f"Chipset: {t['temp']:.1f}°C")
         elif "GPU 0" in t["label"]: pills.append(f"GPU: {t['temp']:.0f}°C")
     if "psu_power" in sysinfo: pills.append(f"Power: {sysinfo['psu_power']}")
+    px = sysinfo.get("pcie_x570")
+    if px and px.get("ok"):
+        ptot = px["correctable"] + px["nonfatal"] + px["fatal"]
+        pills.append(f"PCIe X570: {ptot}" + ("" if ptot == 0 else " ⚠"))
     pills.append(f"Curve Service: {sysinfo.get('curve_service', 'unknown').upper()}")
     pill_text = " " + "  •  ".join(pills)
     print("│" + pill_text.ljust(inner_w) + "│")
@@ -641,6 +791,20 @@ def print_once():
     t_str = " " + "  •  ".join([f"{t['label']}: {t['temp']:.1f}°C" for t in temps])
     for l in textwrap.wrap(t_str, width=inner_w - 2):
         print("│ " + l.ljust(inner_w - 1) + "│")
+    px = sysinfo.get("pcie_x570")
+    if px and px.get("ok"):
+        print("├" + "─" * inner_w + "┤")
+        cor, nf, f = px["correctable"], px["nonfatal"], px["fatal"]
+        tot = cor + nf + f
+        print("│ PCIe Bus Health (X570/PCH subtree) · PCH %s · CPU↔PCH link %s · %d AER ports"
+              % (px["pch"], px["link"], px["devices_scanned"]))
+        status = "OK — 0 errors since boot" if tot == 0 else (
+                 "CORRECTABLE only (recovered)" if f == 0 and nf == 0 else
+                 "UNCORRECTABLE — link degradation likely")
+        print("│   Correctable %d  ·  Non-Fatal %d  ·  Fatal %d   →  %s" % (cor, nf, f, status))
+        if px["detail"]:
+            det = "  ·  ".join("%s %dc/%dnf/%df" % (b[5:], c, n2, f2) for (b, c, n2, f2) in px["detail"])
+            print("│   nonzero: " + det)
     print("├" + "─" * inner_w + "┤")
     footer = " [q] Quit  [r] Refresh  [p] Pause  [+/-] Rate: 1.0s  [c] Re-apply Curves"
     print("│" + footer.ljust(inner_w) + "│")

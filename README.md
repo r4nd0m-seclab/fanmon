@@ -21,6 +21,16 @@ components simply don't show up.
   **X570 chipset** and **GPU 0** temps on a shared adaptive scale; the two
   traces are glyph+color-coded (X570 = white `▪`, GPU = magenta `▮`), newest
   sample on the right. Hidden automatically on short terminals.
+- **PCIe Bus Health (X570/PCH subtree)** — unprivileged read of the kernel
+  AER (Advanced Error Reporting) counters for every device behind the X570
+  PCH, plus the CPU↔PCH link. Summarizes **Correctable / Non-Fatal / Fatal**
+  errors since boot in a pill (`PCIe X570: N`, ⚠ when N>0) and a dedicated
+  block listing the PCH BDF, link BDF, AER port count, and any nonzero
+  per-device counters. The X570 is located by PCI device ID (AMD `1022:57ad`
+  "Switch Upstream"), so it survives a bus-address reshuffle; the walk uses
+  only world-readable sysfs (`/sys/bus/pci/devices/*/aer_dev_*`), no root.
+  Note: AER counters reset on reboot and count only *since boot* — for
+  boot-over-boot drift, pair with `rasdaemon`.
 - **Dynamic hwmon discovery** — finds `nct*`, `kraken*`, `asusec`, `k10temp`,
   `corsairpsu` hwmon chips at runtime (5 s re-discovery cadence); no
   hardcoded device paths.
