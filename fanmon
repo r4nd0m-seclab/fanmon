@@ -400,34 +400,6 @@ def make_bar(pct, width=12):
     empty = width - filled
     return "■" * filled + "·" * empty
 
-def pill_lines(items, width):
-    """Split the telemetry pill list into at most two lines, breaking only at
-    a '  •  ' separator so no line starts/ends with a dangling bullet. Keeps
-    each line within `width` and balances the two lengths. Returns 1-2 lines
-    (each already carries its leading space)."""
-    sep = "  •  "
-    def prefix_len(k):
-        return 1 + sum(len(x) for x in items[:k]) + len(sep) * (k - 1)
-    total = 1 + sum(len(x) for x in items) + len(sep) * max(0, len(items) - 1)
-    if total <= width:
-        return [" " + sep.join(items)]
-    best_k, best_diff = None, None
-    for k in range(1, len(items)):
-        l1 = prefix_len(k)
-        rest = items[k:]
-        l2 = 1 + sum(len(x) for x in rest) + len(sep) * max(0, len(rest) - 1)
-        if l1 <= width and l2 <= width:
-            diff = abs(l1 - l2)
-            if best_diff is None or diff < best_diff:
-                best_k, best_diff = k, diff
-    if best_k is None:
-        # Too narrow for a clean separator split; hard-cut the joined text.
-        full = " " + sep.join(items)
-        cut = full.rfind(" ", 0, width + 1)
-        if cut <= 0:
-            cut = width
-        return [full[:cut].rstrip(), full[cut:].strip()[:width].rstrip()]
-    return [" " + sep.join(items[:best_k]), " " + sep.join(items[best_k:])]
 # --- Rolling temperature trend (histogram) ---------------------------------
 HIST_ORDER = ["X570 PCH", "GPU 0"]
 HIST_GLYPHS = {"X570 PCH": "▪", "GPU 0": "▮"}
@@ -599,13 +571,11 @@ def tui_loop(stdscr):
         safe_addstr(stdscr, 2, 0, "├" + "─" * inner_w + "┤", curses.color_pair(1))
 
         # 2. Telemetry Pills Bar
+        # Temp pills were dropped: the full temperature set is already listed in
+        # the "Temperature Probes" section near the bottom, so repeating it up
+        # here was redundant. Only the non-temperature system pills remain, and
+        # they fit on a single line.
         pill_items = []
-        for t in temps:
-            if "Tctl" in t["label"]: pill_items.append(f"CPU: {t['temp']:.1f}°C")
-            elif "Coolant" in t["label"]: pill_items.append(f"Coolant: {t['temp']:.1f}°C")
-            elif "Chipset" in t["label"]: pill_items.append(f"Chipset: {t['temp']:.1f}°C")
-            elif "GPU 0" in t["label"]: pill_items.append(f"GPU: {t['temp']:.0f}°C")
-
         if "psu_power" in sysinfo:
             pill_items.append(f"Power: {sysinfo['psu_power']}")
         px = sysinfo.get("pcie_x570")
@@ -615,19 +585,12 @@ def tui_loop(stdscr):
         svc_status = sysinfo.get("curve_service", "unknown")
         pill_items.append(f"SmartFan Curve: {svc_status.upper()}")
 
-        # Two rows tall so every pill fits without clipping: the box is clamped
-        # to 120 cols, so the full pill set exceeds one line. Height is stable
-        # (the second row is drawn blank when everything fits on one line) so
-        # the layout never jitters as values change.
-        p2 = pill_lines(pill_items, inner_w)
-        while len(p2) < 2:
-            p2.append("")
-        safe_addstr(stdscr, 3, 0, "│" + p2[0].ljust(inner_w) + "│", curses.color_pair(6) | curses.A_BOLD)
-        safe_addstr(stdscr, 4, 0, "│" + p2[1].ljust(inner_w) + "│", curses.color_pair(6) | curses.A_BOLD)
+        pill_row = " " + "  •  ".join(pill_items)
+        safe_addstr(stdscr, 3, 0, "│" + pill_row[:inner_w].ljust(inner_w) + "│", curses.color_pair(6) | curses.A_BOLD)
 
         # 3. Table Transition Header (with ┬ dividers aligned to columns)
         top_table_div = "├" + "─"*c1 + "┬" + "─"*c2 + "┬" + "─"*c3 + "┬" + "─"*c4 + "┬" + "─"*c5 + "┬" + "─"*c6 + "┤"
-        safe_addstr(stdscr, 5, 0, top_table_div, curses.color_pair(1))
+        safe_addstr(stdscr, 4, 0, top_table_div, curses.color_pair(1))
 
         col_name = "Fan Header / Device"
         col_rpm = "Speed"
@@ -637,13 +600,13 @@ def tui_loop(stdscr):
         col_status = "Status / Acoustic Level"
 
         table_header = f"│ {col_name:<{c1-2}} │ {col_rpm:>{c2-2}} │ {col_pwm:>{c3-2}} │ {col_bar:<{c4-2}} │ {col_mode:<{c5-2}} │ {col_status:<{c6-2}} │"
-        safe_addstr(stdscr, 6, 0, table_header, curses.color_pair(1) | curses.A_BOLD)
+        safe_addstr(stdscr, 5, 0, table_header, curses.color_pair(1) | curses.A_BOLD)
 
         row_div = "├" + "─"*c1 + "┼" + "─"*c2 + "┼" + "─"*c3 + "┼" + "─"*c4 + "┼" + "─"*c5 + "┼" + "─"*c6 + "┤"
-        safe_addstr(stdscr, 7, 0, row_div, curses.color_pair(1))
+        safe_addstr(stdscr, 6, 0, row_div, curses.color_pair(1))
 
         # 4. Fans Data Rows
-        row_y = 8
+        row_y = 7
         for fan in fans:
             if row_y >= h - 7:
                 break
@@ -789,22 +752,14 @@ def print_once():
     print("├" + "─" * inner_w + "┤")
 
     pills = []
-    for t in temps:
-        if "Tctl" in t["label"]: pills.append(f"CPU: {t['temp']:.1f}°C")
-        elif "Coolant" in t["label"]: pills.append(f"Coolant: {t['temp']:.1f}°C")
-        elif "Chipset" in t["label"]: pills.append(f"Chipset: {t['temp']:.1f}°C")
-        elif "GPU 0" in t["label"]: pills.append(f"GPU: {t['temp']:.0f}°C")
     if "psu_power" in sysinfo: pills.append(f"Power: {sysinfo['psu_power']}")
     px = sysinfo.get("pcie_x570")
     if px and px.get("ok"):
         ptot = px["correctable"] + px["nonfatal"] + px["fatal"]
         pills.append(f"PCIe X570: {ptot}" + ("" if ptot == 0 else " ⚠"))
     pills.append(f"Curve Service: {sysinfo.get('curve_service', 'unknown').upper()}")
-    p2 = pill_lines(pills, inner_w)
-    while len(p2) < 2:
-        p2.append("")
-    print("│" + p2[0].ljust(inner_w) + "│")
-    print("│" + p2[1].ljust(inner_w) + "│")
+    pill_row = " " + "  •  ".join(pills)
+    print("│" + pill_row[:inner_w].ljust(inner_w) + "│")
 
     # Table top transition
     print("├" + "─"*c1 + "┬" + "─"*c2 + "┬" + "─"*c3 + "┬" + "─"*c4 + "┬" + "─"*c5 + "┬" + "─"*c6 + "┤")
